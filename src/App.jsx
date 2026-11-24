@@ -260,7 +260,7 @@ const pct       = (n)     => Number(n||0).toLocaleString("fr-FR",{minimumFractio
 const ligneNetHT = (l) => (+l.qte||0) * (+l.prix||0) * (1 - (+l.remise||0)/100);
 const ligneTVA   = (l) => ligneNetHT(l) * (+l.tva||0)/100;
 const ligneTTC   = (l) => ligneNetHT(l) + ligneTVA(l);
-const docCalc = (lignes=[], remiseGlobale=0) => {
+const docCalc = (lignes=[], remiseGlobale=0, modeReglement="") => {
 const brut      = lignes.reduce((s,l)=>s+(+l.qte||0)*(+l.prix||0),0);
 const remLignes = lignes.reduce((s,l)=>s+(+l.qte||0)*(+l.prix||0)*(+l.remise||0)/100,0);
 const netHT     = brut - remLignes;
@@ -276,8 +276,36 @@ tvaMap[taux].montant += base * taux/100;
 });
 const totalTVA = Object.values(tvaMap).reduce((s,t)=>s+t.montant,0);
 const ttc      = baseHT + totalTVA;
-return { brut, remLignes, netHT, remGlob, baseHT, tvaMap, totalTVA, ttc };
+const timbre   = calcTimbre(ttc, modeReglement);
+const netAPayer= ttc + timbre;
+return { brut, remLignes, netHT, remGlob, baseHT, tvaMap, totalTVA, ttc, timbre, netAPayer };
 };
+// ── Modes de règlement & droit de timbre ─────────────────────────────
+// Droit de timbre (Maroc) : 0,25 % du montant réglé en espèces.
+const TAUX_TIMBRE = 0.25;
+const MODES_REGLEMENT=["Espèces","Chèque","Virement bancaire","Traite","LCR","Prélèvement","Carte bancaire","Compensation","Autre"];
+const MODES_LEGACY={"cheque":"Chèque","chéque":"Chèque","virement":"Virement bancaire","especes":"Espèces","espece":"Espèces","espèce":"Espèces","cash":"Espèces","cb":"Carte bancaire","carte":"Carte bancaire","effet":"Traite"};
+const normModeRegl=(m)=>{
+const k=String(m||"").trim();
+if(!k)return "";
+return MODES_REGLEMENT.find(x=>x.toLowerCase()===k.toLowerCase())||MODES_LEGACY[k.toLowerCase()]||k;
+};
+const isEspeces=(m)=>normModeRegl(m)==="Espèces";
+function calcTimbre(montant,mode){return isEspeces(mode)?Math.round((+montant||0)*TAUX_TIMBRE)/100:0;}
+// Options d'un <select> de mode : liste standard + valeur historique éventuelle (non perdue)
+const modeOptions=(cur)=>{const v=String(cur||"").trim();return v&&!MODES_REGLEMENT.includes(v)?[...MODES_REGLEMENT,v]:MODES_REGLEMENT;};
+// Mode de paiement proposé : celui du document, sinon celui affecté au tiers
+const modePaiementDefaut=(doc,tiers)=>{
+const m1=normModeRegl(doc?.modeReglement);if(MODES_REGLEMENT.includes(m1))return m1;
+const m2=normModeRegl(tiers?.modeReglement);if(MODES_REGLEMENT.includes(m2))return m2;
+return "";
+};
+// Tous les règlements (anciens « reglements » + « reglementsVente/Achat »), sans doublons
+const allReglements=(data)=>{
+const seen=new Set();
+return [...(data?.reglementsVente||[]),...(data?.reglementsAchat||[]),...(data?.reglements||[])].filter(r=>r&&!seen.has(r.id)&&seen.add(r.id));
+};
+const regleFacture=(data,factureId)=>allReglements(data).filter(r=>r.factureId===factureId&&r.statut==="Encaissé").reduce((s,r)=>s+(+r.montant||0),0);
 const newLigne  = () => ({id:uid("L"),articleId:"",article:"",designation:"",unite:"",qte:1,prix:0,remise:0,tva:20,depotId:"",emplacement:"",note:""});
 const genNum    = (c,o=0) => { const s=String((c.seq||1)+o).padStart(c.pad||4,"0"); return c.annee?`${c.prefix}${new Date().getFullYear()}${c.sep}${s}`:`${c.prefix}${s}`; };
 const avatarC   = (n="")  => ["#7c3aed","#1a56db","#0891b2","#d97706","#dc2626","#16a34a"][Math.abs([...n].reduce((h,c)=>(h<<5)-h+c.charCodeAt(0),0))%6];
@@ -1374,7 +1402,7 @@ nom:"",nomCommercial:"",famille:"",sousFamille:"",
 tel:"",tel2:"",fax:"",email:"",email2:"",siteWeb:"",
 adresse:"",adresse2:"",ville:"",cp:"",pays:"Maroc",region:"",
 rc:"",ice:"",if_:"",patente:"",cnss:"",
-modeReglement:"30 jours",delaiPaiement:"30",plafondCredit:"",
+modeReglement:"",delaiPaiement:"30",plafondCredit:"",
 remiseGlobale:"",devise:"MAD (DH)",commercial:"",compteComptable:"",
 notes:"",actif:true,
 };
@@ -1498,7 +1526,6 @@ ${docs.length>0?`<h3 style="font-size:11px;text-transform:uppercase;letter-spaci
 openPrint(html);
 };
 const PAYS=["Maroc","France","Belgique","Espagne","Italie","Allemagne","Tunisie","Algerie","Autre"];
-const MODES=["Comptant","30 jours","60 jours","90 jours","A la commande","Virement","Cheque","Traite"];
 const DEVISES=["MAD (DH)","EUR","USD","GBP","CHF","AED"];
 const TABS=[
 {id:"coord",label:"Coordonnees"},
@@ -1628,7 +1655,7 @@ options={(data[cfg.sfKey]||[]).filter(f=>f.familleId===form.famille).map(f=>({id
 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"0 18px"}}>
 <Fld label="Mode de reglement">
 <select style={S.inp} value={form.modeReglement||""} onChange={e=>upd("modeReglement",e.target.value)}>
-<option value="">--</option>{MODES.map(m=><option key={m}>{m}</option>)}
+<option value="">--</option>{modeOptions(form.modeReglement).map(m=><option key={m}>{m}</option>)}
 </select>
 </Fld>
 <Fld label="Delai de paiement (jours)"><input type="number" style={S.inp} min="0" value={form.delaiPaiement||""} onChange={e=>upd("delaiPaiement",e.target.value)}/></Fld>
@@ -3502,9 +3529,7 @@ const docsCopyRows=()=>sortedDocs.filter(d=>selDocs.has(d.id)).map(d=>{
 const calc2=docCalc(d.lignes,d.remiseGlobale||0);
 const isF2=docType==="ach-facture"||docType==="vte-facture";
 const isVte2=docType==="vte-facture";
-const paye2=isF2?(data[isVte2?"reglementsVente":"reglementsAchat"]||[])
-.filter(r=>r.factureId===d.id&&r.statut==="Encaissé")
-.reduce((s,r)=>s+(+r.montant||0),0):0;
+const paye2=isF2?regleFacture(data,d.id):0;
 return{
 "N° Document":d.ref||"",
 "Origine":d.sourceRef||"",
@@ -3583,18 +3608,20 @@ const saveRegl=()=>{
 if(!reglModal)return;
 const {doc,montant,mode,date,ref,notes}=reglModal;
 if(!montant||+montant<=0){showToast("Montant invalide",false);return;}
+if(!mode){showToast("Choisissez le mode de paiement",false);return;}
 const isVte2=docType==="vte-facture"||docType==="vte-proforma";
 const regKey=isVte2?"reglementsVente":"reglementsAchat";
 const rec={
 id:uid("RGL"),factureId:doc.id,factureRef:doc.ref,
 tiersId:doc.tiers,montant:+montant,
-mode:mode||"Espèces",date:date||today(),
+mode,date:date||today(),timbre:calcTimbre(montant,mode),
 ref:ref||"",notes:notes||"",
 statut:"Encaissé",type:isVte2?"vente":"achat",
 docType,
 };
 setData(p=>({...p,[regKey]:[...(p[regKey]||[]),rec]}));
-showToast(`Règlement de ${fmt(+montant)} DH enregistré ✅`);
+const tb=calcTimbre(montant,mode);
+showToast(`Règlement de ${fmt(+montant)} DH enregistré${tb>0?` + timbre ${fmt(tb)} DH`:""} ✅`);
 setReglModal(null);
 };
 const delDoc=(id)=>{
@@ -3876,8 +3903,8 @@ const DCOLS=[
 {id:"du",     label:"Montant dû",   fixed:false, onlyF:true},
 {id:"regle",  label:"Réglé",        fixed:false, onlyF:true},
 {id:"solde",  label:"Solde",        fixed:false, onlyF:true, sort:(a,b)=>{
-const pA=(data[regKey]||[]).filter(r=>r.factureId===a.id&&r.statut==="Encaissé").reduce((s,r)=>s+(+r.montant||0),0);
-const pB=(data[regKey]||[]).filter(r=>r.factureId===b.id&&r.statut==="Encaissé").reduce((s,r)=>s+(+r.montant||0),0);
+const pA=regleFacture(data,a.id);
+const pB=regleFacture(data,b.id);
 return (docCalc(a.lignes,a.remiseGlobale||0).ttc-pA)-(docCalc(b.lignes,b.remiseGlobale||0).ttc-pB);
 }},
 {id:"actions",label:"Actions",      fixed:true},
@@ -3986,8 +4013,8 @@ Aucun document
 )}
 {sortedDocs.map(d=>{
 const calc2=docCalc(d.lignes,d.remiseGlobale||0);
-const regls=(data[regKey]||[]);
-const paye2=isF?regls.filter(r=>r.factureId===d.id&&r.statut==="Encaissé").reduce((s,r)=>s+(+r.montant||0),0):0;
+const regls=allReglements(data);
+const paye2=isF?regleFacture(data,d.id):0;
 const enAtt2=isF?regls.filter(r=>r.factureId===d.id&&r.statut==="En attente").reduce((s,r)=>s+(+r.montant||0),0):0;
 const reste2=isF?Math.max(0,calc2.ttc-paye2):0;
 const tiers2=tiersList.find(t=>t.id===d.tiers);
@@ -4070,8 +4097,7 @@ title={circ2.lbl} onClick={e=>{e.stopPropagation();genNextFromList(d,circ2.next)
 const isReglable=(isF&&isValide2)||
 (isPF2&&(d.statut==="Confirmée"||d.statut==="Envoyée"||isValide2));
 const pfCalc=docCalc(d.lignes,d.remiseGlobale||0);
-const pfRegls=(data[isVte?"reglementsVente":"reglementsAchat"]||[]);
-const pfPaye=pfRegls.filter(r=>r.factureId===d.id&&r.statut==="Encaissé").reduce((s,r)=>s+(+r.montant||0),0);
+const pfPaye=regleFacture(data,d.id);
 const pfReste=Math.max(0,pfCalc.ttc-pfPaye);
 const pfSolde=pfReste<=0&&pfCalc.ttc>0;
 if(!isReglable)return null;
@@ -4079,7 +4105,7 @@ return pfSolde
 ?<span style={{...S.badge,background:"#f0fdf4",color:"#16a34a",fontSize:9}}>✅</span>
 :<button style={{...S.btnSm,background:"#f0fdf4",color:"#16a34a",borderColor:"#86efac",fontSize:11}}
 title="Enregistrer un règlement"
-onClick={e=>{e.stopPropagation();setReglModal({doc:d,montant:String(pfReste>0?pfReste:pfCalc.ttc),mode:"Espèces",date:today(),ref:"",notes:""});}}>
+onClick={e=>{e.stopPropagation();setReglModal({doc:d,montant:(pfReste>0?pfReste:pfCalc.ttc).toFixed(2),mode:modePaiementDefaut(d,tiers2),date:today(),ref:"",notes:""});}}>
 💰
 </button>;
 })()}
@@ -4247,7 +4273,7 @@ onClick={saveRegroup}>
 const calc2=docCalc(reglModal.doc.lignes,reglModal.doc.remiseGlobale||0);
 const isVte=docType==="vte-facture"||docType==="vte-proforma";
 const regKey=isVte?"reglementsVente":"reglementsAchat";
-const dejaPaye=(data[regKey]||[]).filter(r=>r.factureId===reglModal.doc.id&&r.statut==="Encaissé").reduce((s,r)=>s+(+r.montant||0),0);
+const dejaPaye=regleFacture(data,reglModal.doc.id);
 const resteDu=calc2.ttc-dejaPaye;
 return(
 <>
@@ -4273,10 +4299,19 @@ autoFocus/>
 </div>
 <div style={{marginBottom:12}}>
 <label style={S.lbl}>Mode de paiement</label>
-<select style={S.inp} value={reglModal.mode} onChange={e=>setReglModal(p=>({...p,mode:e.target.value}))}>
-{["Espèces","Chèque","Virement bancaire","Traite","Carte bancaire","Compensation","Autre"].map(m=><option key={m}>{m}</option>)}
+<select style={S.inp} value={reglModal.mode||""} onChange={e=>setReglModal(p=>({...p,mode:e.target.value}))}>
+<option value="">-- Choisir --</option>
+{MODES_REGLEMENT.map(m=><option key={m}>{m}</option>)}
 </select>
+{(()=>{const t=tiersList.find(x=>x.id===reglModal.doc.tiers);const mt=normModeRegl(t?.modeReglement);
+return mt?<div style={{fontSize:10,color:reglModal.mode&&reglModal.mode!==mt?"#d97706":"#94a3b8",marginTop:3}}>Mode affecté au {cfg.tiersLabel.toLowerCase()} : <b>{mt}</b>{reglModal.mode&&reglModal.mode!==mt?" ⚠ différent":""}</div>:null;})()}
 </div>
+{isEspeces(reglModal.mode)&&+reglModal.montant>0&&(
+<div style={{gridColumn:"1/-1",marginBottom:12,background:"#fffbeb",border:"1px solid #fcd34d",borderRadius:8,padding:"8px 12px",fontSize:12,display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+<span>Droit de timbre {String(TAUX_TIMBRE).replace(".",",")}% : <b style={{fontFamily:"monospace"}}>{fmt(calcTimbre(reglModal.montant,reglModal.mode))} DH</b></span>
+<span>Total à encaisser : <b style={{fontFamily:"monospace",color:"#16a34a"}}>{fmt(+reglModal.montant+calcTimbre(reglModal.montant,reglModal.mode))} DH</b></span>
+</div>
+)}
 <div style={{marginBottom:12}}>
 <label style={S.lbl}>Référence (N° chèque, virement...)</label>
 <input style={{...S.inp,fontFamily:"monospace"}} value={reglModal.ref} onChange={e=>setReglModal(p=>({...p,ref:e.target.value}))} placeholder="CHQ-001, VIR-2026..."/>
@@ -4436,7 +4471,18 @@ style={{...S.btnP,background:"#0891b2",fontSize:11}}>
 <Fld label={cfg.tiersLabel}>
 <SearchSelect
 value={cur.tiers}
-onChange={v=>setCur(p=>({...p,tiers:v}))}
+onChange={v=>setCur(p=>{
+const t=tiersList.find(x=>x.id===v);
+const nd={...p,tiers:v};
+if(t){
+const m=normModeRegl(t.modeReglement);
+if(m)nd.modeReglement=m;
+const dl=parseInt(t.delaiPaiement,10);
+if(dl>0){const d=new Date(p.dateDoc||today());d.setDate(d.getDate()+dl);nd.dateEcheance=d.toISOString().slice(0,10);}
+else if(dl===0)nd.dateEcheance=p.dateDoc||today();
+}
+return nd;
+})}
 color={cfg.color}
 placeholder={`Choisir ${cfg.tiersLabel.toLowerCase()}...`}
 options={tiersList.map(t=>({
@@ -4680,7 +4726,7 @@ style={{background:"none",border:"none",color:"#dc2626",cursor:"pointer",fontSiz
 <Fld label="Mode de règlement">
 <select style={S.inp} value={cur.modeReglement||""} onChange={e=>setCur(p=>({...p,modeReglement:e.target.value}))}>
 <option value="">-- Sélectionner --</option>
-{["Comptant","30 jours","60 jours","90 jours","À la commande","Virement","Chèque","Traite"].map(m=><option key={m}>{m}</option>)}
+{modeOptions(cur.modeReglement).map(m=><option key={m}>{m}</option>)}
 </select>
 </Fld>
 <Fld label="Date d'échéance">
@@ -4694,7 +4740,7 @@ style={{background:"none",border:"none",color:"#dc2626",cursor:"pointer",fontSiz
 <span>📊</span> Récapitulatif
 </div>
 {(()=>{
-const c=docCalc(cur.lignes,cur.remiseGlobale||0);
+const c=docCalc(cur.lignes,cur.remiseGlobale||0,isFacture?cur.modeReglement:"");
 return(
 <>
 <div style={{display:"flex",justifyContent:"space-between",padding:"5px 0",fontSize:13,color:"#64748b",borderBottom:"1px solid #f0f4f8"}}>
@@ -4743,6 +4789,18 @@ onChange={e=>setCur(p=>({...p,remiseGlobale:Math.min(100,Math.max(0,+e.target.va
 <span style={{color:"#a8b8cc",fontWeight:700,fontSize:13,textTransform:"uppercase"}}>Total TTC</span>
 <span style={{color:"#e8a020",fontWeight:900,fontSize:20,fontFamily:"monospace"}}>{fmt(c.ttc)} DH</span>
 </div>
+{c.timbre>0&&(
+<>
+<div style={{display:"flex",justifyContent:"space-between",padding:"6px 0",fontSize:13,color:"#64748b",borderBottom:"1px dashed #f0f4f8"}}>
+<span>Droit de timbre {String(TAUX_TIMBRE).replace(".",",")}% <span style={{color:"#94a3b8",fontSize:11}}>(règlement en espèces)</span></span>
+<span style={{fontFamily:"monospace"}}>{fmt(c.timbre)} DH</span>
+</div>
+<div style={{display:"flex",justifyContent:"space-between",padding:"8px 0",fontSize:14,fontWeight:800,color:"#1a2332"}}>
+<span>NET À PAYER</span>
+<span style={{fontFamily:"monospace"}}>{fmt(c.netAPayer)} DH</span>
+</div>
+</>
+)}
 {/* Champs calculés en-tête */}
 {(data.champsCalcules||[]).filter(ch=>ch.portee==="entete"&&ch.actif!==false&&ch.afficherDoc).map(champ=>{
 const ctx={
@@ -4856,7 +4914,8 @@ const tiersList=data[cfg.tiers]||[];
 const tiers=tiersList.find(t=>t.id===doc.tiers)||{nom:"--",adresse:"",ville:"",ice:"",rc:"",tel:""};
 const agence=data.agences.find(a=>a.id===doc.agence)||{nom:"--"};
 const {societe}=data;
-const c=docCalc(doc.lignes,doc.remiseGlobale||0);
+const isFactPrint=cfg.isProforma||/facture/i.test(cfg.titre||"");
+const c=docCalc(doc.lignes,doc.remiseGlobale||0,isFactPrint?doc.modeReglement:"");
 const cP=societe.couleurPrincipale||"#1a2332",cA=societe.couleurAccent||"#e8a020";
 const html=`<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8"><title>${doc.ref}</title><style>
 *{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:13px;color:#1a2332;}.p{padding:32px;max-width:860px;margin:0 auto;}
@@ -4909,6 +4968,9 @@ ${c.remGlob>0?`<div class="tr"><span>Remise globale (${doc.remiseGlobale||0}%)</
 <div class="tr"><span><b>Base HT imposable</b></span><span><b>${fmt(c.baseHT)} DH</b></span></div>
 ${Object.values(c.tvaMap).filter(t=>t.montant>0).map(t=>`<div class="tr"><span>TVA ${t.taux}%</span><span>${fmt(t.montant)} DH</span></div>`).join("")}
 <div class="tt"><span>TOTAL TTC</span><span style="color:${cA}">${fmt(c.ttc)} DH</span></div>
+${c.timbre>0?`<div class="tr"><span>Droit de timbre ${String(TAUX_TIMBRE).replace(".",",")}% (espèces)</span><span>${fmt(c.timbre)} DH</span></div><div class="tt"><span>NET À PAYER</span><span style="color:${cA}">${fmt(c.netAPayer)} DH</span></div>`:""}
+${isFactPrint&&doc.modeReglement?`<div class="tr"><span>Mode de règlement</span><span>${doc.modeReglement}</span></div>`:""}
+${isFactPrint&&doc.dateEcheance?`<div class="tr"><span>Échéance</span><span>${doc.dateEcheance}</span></div>`:""}
 </div></div>
 ${doc.notes?`<div style="margin-top:16px;padding:12px;background:#f8fafc;border-radius:6px;font-size:12px"><strong>Notes:</strong> ${doc.notes}</div>`:""}
 <div class="foot"><p>${societe.piedPage||""}</p><p>${societe.mentionsLegales||""}</p></div>
@@ -5026,10 +5088,10 @@ const isAchat=type==="achat";
 const color=isAchat?"#d97706":"#16a34a";
 const tiersList=isAchat?data.fournisseurs:data.clients;
 const factures=(isAchat?["ach-facture"]:["vte-facture"]).flatMap(k=>data.documents[k]||[]);
-const MODES=["Chèque","Virement bancaire","Espèces","Traite","LCR","Prélèvement","Carte bancaire","Autre"];
+const MODES=MODES_REGLEMENT;
 const STATUTS=["En attente","Encaissé","Rejeté","Annulé"];
 const sc={"En attente":"#d97706","Encaissé":"#16a34a","Rejeté":"#dc2626","Annulé":"#94a3b8"};
-const reglements=(data.reglements||[]).filter(r=>r.type===type);
+const reglements=allReglements(data).filter(r=>r.type===type);
 const [modal,setModal]=useState(null);
 const [form,setForm]=useState({});
 const [search,setSearch]=useState("");
@@ -5040,24 +5102,28 @@ const soldeFact=(factureId)=>{
 const f=factures.find(x=>x.id===factureId);
 if(!f)return{ttc:0,regle:0,restant:0};
 const ttc=docCalc(f.lignes,f.remiseGlobale||0).ttc;
-const regle=(data.reglements||[]).filter(r=>r.factureId===factureId&&r.type===type&&r.statut==="Encaissé").reduce((s,r)=>s+r.montant,0);
+const regle=regleFacture(data,factureId);
 return{ttc,regle,restant:Math.max(0,ttc-regle)};
 };
 const onSelectFacture=(factureId)=>{
 const f=factures.find(x=>x.id===factureId);
 if(!f){setForm(p=>({...p,factureId:"",factureRef:"",tiersId:"",montant:""}));return;}
 const s=soldeFact(factureId);
-setForm(p=>({...p,factureId,factureRef:f.ref,tiersId:f.tiers,montant:s.restant.toFixed(2)}));
+const t=tiersList.find(x=>x.id===f.tiers);
+setForm(p=>({...p,factureId,factureRef:f.ref,tiersId:f.tiers,montant:s.restant.toFixed(2),mode:modePaiementDefaut(f,t)||p.mode||""}));
 };
 const save=()=>{
 if(!form.factureId)return showToast("Sélectionnez une facture",false);
 if(!form.montant||+form.montant<=0)return showToast("Montant obligatoire",false);
 if(!form.mode)return showToast("Mode de règlement obligatoire",false);
-const rec={...form,id:form.id||uid("RGL"),montant:+form.montant};
-setData(p=>({...p,reglements:p.reglements?.find(r=>r.id===rec.id)?p.reglements.map(r=>r.id===rec.id?rec:r):[...(p.reglements||[]),rec]}));
+const rec={...form,id:form.id||uid("RGL"),montant:+form.montant,timbre:calcTimbre(form.montant,form.mode)};
+setData(p=>{
+const key=["reglementsVente","reglementsAchat","reglements"].find(k=>(p[k]||[]).some(r=>r.id===rec.id))||"reglements";
+return{...p,[key]:(p[key]||[]).some(r=>r.id===rec.id)?p[key].map(r=>r.id===rec.id?rec:r):[...(p[key]||[]),rec]};
+});
 showToast("Règlement enregistré !");setModal(null);
 };
-const del=(id)=>{setData(p=>({...p,reglements:(p.reglements||[]).filter(r=>r.id!==id)}));showToast("Supprimé");};
+const del=(id)=>{setData(p=>({...p,reglements:(p.reglements||[]).filter(r=>r.id!==id),reglementsVente:(p.reglementsVente||[]).filter(r=>r.id!==id),reglementsAchat:(p.reglementsAchat||[]).filter(r=>r.id!==id)}));showToast("Supprimé");};
 const upd=(k,v)=>setForm(p=>({...p,[k]:v}));
 const totalEnAttente=reglements.filter(r=>r.statut==="En attente").reduce((s,r)=>s+r.montant,0);
 const totalEncaisse =reglements.filter(r=>r.statut==="Encaissé").reduce((s,r)=>s+r.montant,0);
@@ -5128,7 +5194,7 @@ return(
 {label:"Date",key:"date"},{label:"Montant",key:"montant"},{label:"Mode",key:"mode"},
 {label:"Référence",key:"reference"},{label:"Banque",key:"banque"},{label:"Statut",key:"statut"},
 ],"reglements_"+(isAchat?"achats":"ventes"))}>⬇ Excel</button>
-<button style={{...S.btnP,background:color}} onClick={()=>{setForm({id:"",type,factureId:"",factureRef:"",tiersId:"",date:today(),montant:"",mode:"Virement bancaire",reference:"",banque:"",notes:"",statut:"En attente"});setModal("form");}}>+ Nouveau</button>
+<button style={{...S.btnP,background:color}} onClick={()=>{setForm({id:"",type,factureId:"",factureRef:"",tiersId:"",date:today(),montant:"",mode:"",reference:"",banque:"",notes:"",statut:"En attente"});setModal("form");}}>+ Nouveau</button>
 </div>
 </div>
 <div style={{overflowX:"auto"}}>
@@ -5197,9 +5263,17 @@ return{id:f.id,label:f.ref,sub:t?.nom||"",meta:`TTC: ${fmt(ttc)} · Reste: ${fmt
 <Fld label="Mode de règlement" required>
 <select style={S.inp} value={form.mode||""} onChange={e=>upd("mode",e.target.value)}>
 <option value="">-- Choisir --</option>
-{MODES.map(m=><option key={m}>{m}</option>)}
+{modeOptions(form.mode).map(m=><option key={m}>{m}</option>)}
 </select>
+{(()=>{const mt=normModeRegl(tiersList.find(x=>x.id===form.tiersId)?.modeReglement);
+return mt?<div style={{fontSize:10,color:form.mode&&form.mode!==mt?"#d97706":"#94a3b8",marginTop:3}}>Mode affecté au tiers : <b>{mt}</b>{form.mode&&form.mode!==mt?" ⚠ différent":""}</div>:null;})()}
 </Fld>
+{isEspeces(form.mode)&&+form.montant>0&&(
+<div style={{gridColumn:"1/-1",marginBottom:10,background:"#fffbeb",border:"1px solid #fcd34d",borderRadius:8,padding:"8px 12px",fontSize:12,display:"flex",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+<span>Droit de timbre {String(TAUX_TIMBRE).replace(".",",")}% : <b style={{fontFamily:"monospace"}}>{fmt(calcTimbre(form.montant,form.mode))} DH</b></span>
+<span>Total à encaisser : <b style={{fontFamily:"monospace",color}}>{fmt(+form.montant+calcTimbre(form.montant,form.mode))} DH</b></span>
+</div>
+)}
 <Fld label="Référence (N° chèque / virement)"><input style={{...S.inp,fontFamily:"monospace"}} value={form.reference||""} onChange={e=>upd("reference",e.target.value)} placeholder="CHQ-001234"/></Fld>
 <Fld label="Banque"><input style={S.inp} value={form.banque||""} onChange={e=>upd("banque",e.target.value)} placeholder="CIH Maarif"/></Fld>
 <Fld label="Statut">
@@ -5739,13 +5813,13 @@ const [search,setSearch]=useState("");
 const [expanded,setExpanded]=useState({});
 const soldeFact=(f)=>{
 const ttc=docCalc(f.lignes,f.remiseGlobale||0).ttc;
-const regle=(data.reglements||[]).filter(r=>r.factureId===f.id&&r.statut==="Encaissé").reduce((s,r)=>s+r.montant,0);
+const regle=regleFacture(data,f.id);
 return{ttc,regle,restant:Math.max(0,ttc-regle)};
 };
 const balances=tiersList.map(t=>{
 const factures=(data.documents[facKey]||[]).filter(d=>d.tiers===t.id);
 const totalFacture=factures.reduce((s,d)=>s+docCalc(d.lignes,d.remiseGlobale||0).ttc,0);
-const totalRegle=(data.reglements||[]).filter(r=>r.tiersId===t.id&&r.statut==="Encaissé").reduce((s,r)=>s+r.montant,0);
+const totalRegle=allReglements(data).filter(r=>r.tiersId===t.id&&r.type===(isClient?"vente":"achat")&&r.statut==="Encaissé").reduce((s,r)=>s+(+r.montant||0),0);
 return{...t,factures,totalFacture,totalRegle,solde:totalFacture-totalRegle};
 }).filter(b=>b.totalFacture>0||search).filter(b=>!search||b.nom.toLowerCase().includes(search.toLowerCase())).sort((a,b)=>b.solde-a.solde);
 const totalSolde=balances.reduce((s,b)=>s+b.solde,0);
